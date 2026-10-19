@@ -198,11 +198,15 @@ core_pkls = [
 core_loaded = []
 for pkl_name in core_pkls:
     p_path = core_feat_dir / pkl_name
+    if not p_path.exists():
+        p_path = base_dir.parent / "output" / pkl_name
     if p_path.exists():
         cdf = pd.read_pickle(p_path)
         for c in cdf.columns:
             full_data[c] = cdf[c].values
             core_loaded.append(c)
+
+assert len(core_loaded) == 7, f"Expected 7 core v2-v6 features, loaded {len(core_loaded)}"
 
 new_features_loaded = []
 if accepted_dir.exists():
@@ -226,8 +230,8 @@ subspace_cols = [
     'merton_solvency_buffer', 'age_years', 'employed_years'
 ] + (['cand_tariff_joint_ext_lo_ortho'] if has_tariff_col else [])
 
-Z_sub_all = np.column_stack([to_probit(full_data[c].values) for c in subspace_cols])
-z_ext_all = to_probit(full_data['logit_ext_mean'].values)
+Z_sub_all = np.column_stack([to_probit_split(full_data[c].values, N_tr) for c in subspace_cols])
+z_ext_all = to_probit_split(full_data['logit_ext_mean'].values, N_tr)
 k_dim = Z_sub_all.shape[1]
 tau_grid = np.linspace(1.0 / 32.0, 31.0 / 32.0, 31)
 te_idx = np.arange(N_tr, N_all)
