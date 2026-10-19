@@ -295,7 +295,7 @@ while True:
         print(f"[ACCEPTED #{accepted_count}] {cand_name} | dAUC: {delta_auc:+.6f} | Folds: {folds_won}/10 | MaxCorr: {max_corr:.3f} | File: {out_parquet.name}", flush=True)
 
         try:
-            os.system(f'cd "{sandbox_dir}" && git add "{out_parquet}" "{log_file}" && git commit -m "Auto-add discovered manifold feature {cand_name}" && git push origin main')
+            os.system(f'cd "{sandbox_dir}" && git add -f "{out_parquet}" "{log_file}" && git commit -m "Auto-add discovered manifold feature {cand_name}" && git push origin main')
         except Exception:
             pass
         

@@ -7,8 +7,9 @@ data/*.pkl
 data/*.csv
 data/*.parquet
 !data/.gitkeep
-accepted_features/*.parquet
+!accepted_features/*.parquet
 !accepted_features/.gitkeep
 .vscode/
 .idea/
 *.log
+
