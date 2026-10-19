@@ -181,11 +181,11 @@ while True:
     out_vec = np.zeros(N_all, dtype=np.float64)
     U_tr = U_lorentz[:N_tr]
     U_te = U_lorentz[N_tr:]
-    tree_tr = cKDTree(U_tr)
+    tree_tr = cKDTree(U_tr, leafsize=64)
 
     for tr_idx, va_idx in folds:
-        tree_fold = cKDTree(U_tr[tr_idx])
-        dists_va, idxs_va = tree_fold.query(U_tr[va_idx], k=k_neighbors)
+        tree_fold = cKDTree(U_tr[tr_idx], leafsize=64)
+        dists_va, idxs_va = tree_fold.query(U_tr[va_idx], k=k_neighbors, workers=-1)
         weights_va = 1.0 / (dists_va + 1e-4)
         weights_va /= np.sum(weights_va, axis=1, keepdims=True)
 
@@ -197,7 +197,7 @@ while True:
         else:
             out_vec[va_idx] = np.sum(weights_va * y_f[tr_idx][idxs_va], axis=1)
 
-    dists_te, idxs_te = tree_tr.query(U_te, k=k_neighbors)
+    dists_te, idxs_te = tree_tr.query(U_te, k=k_neighbors, workers=-1)
     weights_te = 1.0 / (dists_te + 1e-4)
     weights_te /= np.sum(weights_te, axis=1, keepdims=True)
 
@@ -257,7 +257,6 @@ while True:
         anchor_cols.append(cand_name)
         X_anchor_tr[cand_name] = cand_vec[:N_tr]
     else:
-        if loop_count % 5 == 0:
-            print(f"[Screening #{loop_count}] {cand_name[:36]}... | dAUC: {delta_auc:+.6f} | Folds: {folds_won}/10 | MaxCorr: {max_corr:.3f} ({elapsed:.1f}s)", flush=True)
+        print(f"[Screening #{loop_count}] {cand_name[:36]}... | dAUC: {delta_auc:+.6f} | Folds: {folds_won}/10 | MaxCorr: {max_corr:.3f} ({elapsed:.1f}s)", flush=True)
 
     gc.collect()
