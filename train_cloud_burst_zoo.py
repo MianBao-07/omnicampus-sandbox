@@ -2,7 +2,6 @@ import os
 import gc
 import sys
 import time
-import argparse
 import warnings
 import numpy as np
 import pandas as pd
@@ -21,6 +20,7 @@ warnings.filterwarnings('ignore')
 start_time = time.time()
 base_dir = Path(__file__).resolve().parent
 data_dir = base_dir / "data"
+core_feat_dir = base_dir / "core_features"
 accepted_dir = base_dir / "accepted_features"
 output_dir = base_dir / "burst_output"
 output_dir.mkdir(parents=True, exist_ok=True)
@@ -50,6 +50,28 @@ def to_probit_split(p, n_tr):
     out[:n_tr] = to_probit(p_arr[:n_tr])
     out[n_tr:] = to_probit(p_arr[n_tr:])
     return out
+
+def haar_orthogonal_directions(k, n_blocks, seed=42):
+    rng = np.random.default_rng(seed)
+    blocks = []
+    for _ in range(n_blocks):
+        G = rng.standard_normal((k, k))
+        Q, R = np.linalg.qr(G)
+        d = np.diag(R)
+        Q = Q * np.where(d >= 0, 1.0, -1.0)
+        blocks.append(Q)
+    return np.vstack(blocks)
+
+def mean_w1_to_quantiles(P_eval, q_grid):
+    Q_len, L_len = q_grid.shape
+    total = np.zeros(P_eval.shape[0], dtype=np.float64)
+    for l_idx in range(L_len):
+        ql = q_grid[:, l_idx]
+        xl = P_eval[:, l_idx]
+        pref = np.concatenate([[0.0], np.cumsum(ql)])
+        m = np.searchsorted(ql, xl, side='right')
+        total += ((2.0 * m - Q_len) * xl - 2.0 * pref[m] + pref[Q_len]) / float(Q_len)
+    return total / float(L_len)
 
 combined = pd.concat([train_df.drop(columns=['TARGET'], errors='ignore'), test_df], ignore_index=True)
 combined['client_key_1'] = combined['DAYS_BIRTH'].astype(str) + '_' + combined['CODE_GENDER'].astype(str) + '_' + combined['DAYS_REGISTRATION'].astype(str)
@@ -167,6 +189,21 @@ for cat in ['OCCUPATION_TYPE', 'ORGANIZATION_TYPE', 'NAME_INCOME_TYPE', 'REGION_
 full_data['org_occ'] = full_data['ORGANIZATION_TYPE'].astype(str) + '_' + full_data['OCCUPATION_TYPE'].astype(str)
 full_data['edu_gender'] = full_data['NAME_EDUCATION_TYPE'].astype(str) + '_' + full_data['CODE_GENDER'].astype(str)
 
+core_pkls = [
+    "accepted_subbin_features_full.pkl",
+    "accepted_actuarial_features_full.pkl",
+    "accepted_v5_discrete_tariffs_full.pkl",
+    "accepted_v6_osw_bipartite_full.pkl"
+]
+core_loaded = []
+for pkl_name in core_pkls:
+    p_path = core_feat_dir / pkl_name
+    if p_path.exists():
+        cdf = pd.read_pickle(p_path)
+        for c in cdf.columns:
+            full_data[c] = cdf[c].values
+            core_loaded.append(c)
+
 new_features_loaded = []
 if accepted_dir.exists():
     parquet_files = sorted(list(accepted_dir.glob("*.parquet")))
@@ -180,7 +217,20 @@ if accepted_dir.exists():
         except Exception as e:
             print(f"Warning: Failed loading {pf.name}: {e}")
 
-print(f"Loaded {len(new_features_loaded)} discovered features from {accepted_dir.name}: {new_features_loaded}")
+print(f"Loaded {len(core_loaded)} core v2-v6 features + {len(new_features_loaded)} newly discovered features: {new_features_loaded}", flush=True)
+
+has_tariff_col = 'cand_tariff_joint_ext_lo_ortho' in full_data.columns
+subspace_cols = [
+    'ext_1_hybrid', 'EXT_SOURCE_2', 'ext_3_hybrid', 'logit_ext_mean',
+    'payment_rate', 'annuity_to_income', 'credit_to_income', 'goods_to_credit',
+    'merton_solvency_buffer', 'age_years', 'employed_years'
+] + (['cand_tariff_joint_ext_lo_ortho'] if has_tariff_col else [])
+
+Z_sub_all = np.column_stack([to_probit(full_data[c].values) for c in subspace_cols])
+z_ext_all = to_probit(full_data['logit_ext_mean'].values)
+k_dim = Z_sub_all.shape[1]
+tau_grid = np.linspace(1.0 / 32.0, 31.0 / 32.0, 31)
+te_idx = np.arange(N_tr, N_all)
 
 cat_cols = [
     'NAME_CONTRACT_TYPE', 'CODE_GENDER', 'NAME_INCOME_TYPE',
@@ -237,6 +287,10 @@ for s_idx, current_seed in enumerate(seeds):
     X_sph_tr_raw = train_s[sphere_source_cols].fillna(0).values
     X_sph_te_raw = test_s[sphere_source_cols].fillna(0).values
 
+    V_ortho_seed = haar_orthogonal_directions(k_dim, n_blocks=4, seed=current_seed)
+    P_lin_seed = Z_sub_all @ V_ortho_seed.T
+    osw_w1_seed = np.zeros(N_all, dtype=np.float64)
+
     for fold, (tr_idx, val_idx) in enumerate(skf.split(train_s, y)):
         scaler = StandardScaler().fit(X_sph_tr_raw[tr_idx])
         X_std_tr = scaler.transform(X_sph_tr_raw[tr_idx])
@@ -271,6 +325,17 @@ for s_idx, current_seed in enumerate(seeds):
         test_s['cos_sim_default'] += cos_d_te / float(n_splits)
         test_s['cos_directional_margin'] += (cos_s_te - cos_d_te) / float(n_splits)
         test_s['hypersphere_radius'] += norm_te.flatten() / float(n_splits)
+
+        idx_s = tr_idx[y_tr_fold == 0]
+        idx_d = tr_idx[y_tr_fold == 1]
+        q_lin_s = np.quantile(P_lin_seed[idx_s], tau_grid, axis=0)
+        q_lin_d = np.quantile(P_lin_seed[idx_d], tau_grid, axis=0)
+        osw_w1_seed[val_idx] = mean_w1_to_quantiles(P_lin_seed[val_idx], q_lin_s) - mean_w1_to_quantiles(P_lin_seed[val_idx], q_lin_d)
+        osw_w1_seed[te_idx] += (mean_w1_to_quantiles(P_lin_seed[te_idx], q_lin_s) - mean_w1_to_quantiles(P_lin_seed[te_idx], q_lin_d)) / float(n_splits)
+
+    cand_osw_seed = to_probit_split(osw_w1_seed, N_tr) + 0.62 * z_ext_all
+    train_s['cand_osw_w1_plus_ext_062'] = cand_osw_seed[:N_tr]
+    test_s['cand_osw_w1_plus_ext_062'] = cand_osw_seed[N_tr:]
 
     for train_idx, val_idx in skf.split(train_s, y):
         tr = train_s.iloc[train_idx]
