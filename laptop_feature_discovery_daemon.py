@@ -119,23 +119,27 @@ if 'cand_bipartite_2hop_pr_surplus' in full_df.columns:
 
 Z_raw_man = np.column_stack([to_probit_split(full_df[c].values, N_tr) for c in man_feature_pool])
 
+context_cols = ['ext_1_hybrid', 'EXT_SOURCE_2', 'ext_3_hybrid', 'payment_rate']
+X_context_tr = full_df.iloc[:N_tr][context_cols].copy()
+
 def run_residual_probe(feat_series):
     v = np.asarray(feat_series, dtype=np.float64)
     v_clean = np.where(np.isnan(v), np.nanmedian(v), v)
-    df_eval = pd.DataFrame({'cand': v_clean[:N_tr]})
+    df_eval = X_context_tr.copy()
+    df_eval['cand'] = v_clean[:N_tr]
     
     oof_res = np.zeros(N_tr)
     fold_aucs = np.zeros(10)
     params = {
-        'objective': 'binary', 'learning_rate': 0.020, 'n_estimators': 80,
-        'num_leaves': 15, 'max_depth': 4, 'min_child_samples': 150,
-        'colsample_bytree': 1.0, 'subsample': 0.85, 'subsample_freq': 1,
-        'reg_alpha': 5.0, 'reg_lambda': 40.0, 'random_state': 42, 'n_jobs': -1, 'verbose': -1
+        'objective': 'binary', 'learning_rate': 0.015, 'n_estimators': 60,
+        'num_leaves': 10, 'max_depth': 3, 'min_child_samples': 250,
+        'colsample_bytree': 0.85, 'subsample': 0.85, 'subsample_freq': 1,
+        'reg_alpha': 10.0, 'reg_lambda': 60.0, 'random_state': 42, 'n_jobs': -1, 'verbose': -1
     }
     for f_idx, (tr_idx, va_idx) in enumerate(folds):
         dtr = lgb.Dataset(df_eval.iloc[tr_idx], label=y[tr_idx], init_score=base_init_logits[tr_idx])
         dva = lgb.Dataset(df_eval.iloc[va_idx], label=y[va_idx], init_score=base_init_logits[va_idx], reference=dtr)
-        bst = lgb.train(params, dtr, valid_sets=[dva], callbacks=[lgb.early_stopping(25, verbose=False)])
+        bst = lgb.train(params, dtr, valid_sets=[dva], callbacks=[lgb.early_stopping(20, verbose=False)])
         raw_margin = base_init_logits[va_idx] + bst.predict(df_eval.iloc[va_idx], raw_score=True)
         oof_res[va_idx] = raw_margin
         fold_aucs[f_idx] = roc_auc_score(y[va_idx], raw_margin)
