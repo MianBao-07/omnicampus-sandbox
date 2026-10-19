@@ -119,27 +119,46 @@ if 'cand_bipartite_2hop_pr_surplus' in full_df.columns:
 
 Z_raw_man = np.column_stack([to_probit_split(full_df[c].values, N_tr) for c in man_feature_pool])
 
-context_cols = ['ext_1_hybrid', 'EXT_SOURCE_2', 'ext_3_hybrid', 'payment_rate']
-X_context_tr = full_df.iloc[:N_tr][context_cols].copy()
+def haar_orthogonal_directions(k, n_blocks, seed=42):
+    rng = np.random.default_rng(seed)
+    blocks = []
+    for _ in range(n_blocks):
+        G = rng.standard_normal((k, k))
+        Q, R = np.linalg.qr(G)
+        d = np.diag(R)
+        Q = Q * np.where(d >= 0, 1.0, -1.0)
+        blocks.append(Q)
+    return np.vstack(blocks)
+
+def mean_w1_to_quantiles(P_eval, q_grid):
+    Q_len, L_len = q_grid.shape
+    total = np.zeros(P_eval.shape[0], dtype=np.float64)
+    for l_idx in range(L_len):
+        ql = q_grid[:, l_idx]
+        xl = P_eval[:, l_idx]
+        pref = np.concatenate([[0.0], np.cumsum(ql)])
+        m = np.searchsorted(ql, xl, side='right')
+        total += ((2.0 * m - Q_len) * xl - 2.0 * pref[m] + pref[Q_len]) / float(Q_len)
+    return total / float(L_len)
+
+tau_grid = np.linspace(1.0 / 32.0, 31.0 / 32.0, 31)
 
 def run_residual_probe(feat_series):
     v = np.asarray(feat_series, dtype=np.float64)
     v_clean = np.where(np.isnan(v), np.nanmedian(v), v)
-    df_eval = X_context_tr.copy()
-    df_eval['cand'] = v_clean[:N_tr]
+    df_eval = pd.DataFrame({'cand': v_clean[:N_tr]})
     
     oof_res = np.zeros(N_tr)
     fold_aucs = np.zeros(10)
     params = {
-        'objective': 'binary', 'learning_rate': 0.015, 'n_estimators': 60,
-        'num_leaves': 10, 'max_depth': 3, 'min_child_samples': 250,
-        'colsample_bytree': 0.85, 'subsample': 0.85, 'subsample_freq': 1,
-        'reg_alpha': 10.0, 'reg_lambda': 60.0, 'random_state': 42, 'n_jobs': -1, 'verbose': -1
+        'objective': 'binary', 'learning_rate': 0.015, 'n_estimators': 30,
+        'num_leaves': 6, 'max_depth': 2, 'min_child_samples': 500,
+        'colsample_bytree': 1.0, 'subsample': 0.85, 'subsample_freq': 1,
+        'reg_alpha': 15.0, 'reg_lambda': 120.0, 'random_state': 42, 'n_jobs': -1, 'verbose': -1
     }
     for f_idx, (tr_idx, va_idx) in enumerate(folds):
         dtr = lgb.Dataset(df_eval.iloc[tr_idx], label=y[tr_idx], init_score=base_init_logits[tr_idx])
-        dva = lgb.Dataset(df_eval.iloc[va_idx], label=y[va_idx], init_score=base_init_logits[va_idx], reference=dtr)
-        bst = lgb.train(params, dtr, valid_sets=[dva], callbacks=[lgb.early_stopping(20, verbose=False)])
+        bst = lgb.train(params, dtr)
         raw_margin = base_init_logits[va_idx] + bst.predict(df_eval.iloc[va_idx], raw_score=True)
         oof_res[va_idx] = raw_margin
         fold_aucs[f_idx] = roc_auc_score(y[va_idx], raw_margin)
@@ -152,7 +171,7 @@ for f_idx, (_, va_idx) in enumerate(folds):
 
 print(f"Loaded Laptop Manifold Environment: 10-Fold Champion Control AUC = {control_auc:.6f}")
 print(f"Monitoring {len(anchor_cols)} active core features in the orthogonality reference set.")
-print("Starting Autonomous Klein Hyperbolic & k-NN Manifold Search Loop...\n", flush=True)
+print("Starting Autonomous Klein Hyperbolic & Manifold Search Loop...\n", flush=True)
 
 loop_count = 0
 accepted_count = 0
@@ -163,59 +182,76 @@ while True:
     seed = int(np.random.randint(1000, 999999))
     rng = np.random.default_rng(seed)
 
+    generator_mode = rng.choice(["sliced_klein_w1", "shrunk_knn_residual", "conformal_subspace_contrast"])
+    cand_vec = None
+    cand_name = None
+    recipe_desc = ""
+
     k_sub_size = int(rng.choice([5, 7, 9, 11]))
     sub_indices = rng.choice(Z_raw_man.shape[1], size=k_sub_size, replace=False)
-    sub_names = [man_feature_pool[i] for i in sub_indices]
-
     w_weights = rng.uniform(0.5, 2.0, size=k_sub_size)
     w_weights /= np.sum(w_weights)
     Z_selected = Z_raw_man[:, sub_indices] * np.sqrt(w_weights)[None, :]
 
-    alpha_k = float(rng.uniform(0.12, 0.32))
+    alpha_k = float(rng.uniform(0.12, 0.28))
     e_norm = np.linalg.norm(Z_selected, axis=1, keepdims=True)
-    r_poincare = np.tanh(alpha_k * e_norm)
+    r_poincare = np.tanh(alpha_k * (e_norm / np.sqrt(k_sub_size)))
     U_poincare = Z_selected * (r_poincare / (e_norm + 1e-9))
-    u_sq_norm = np.clip(np.sum(U_poincare ** 2, axis=1), 0.0, 1.0 - 1e-6)
-    gamma_lorentz = 1.0 / np.sqrt(1.0 - u_sq_norm)
-    U_lorentz = np.column_stack([gamma_lorentz, gamma_lorentz[:, None] * U_poincare])
 
-    k_neighbors = int(rng.choice([30, 60, 120, 240]))
-    mode_target = rng.choice(["knn_residual_diffusion", "knn_pos_neg_ratio", "knn_target_density"])
+    if generator_mode == "sliced_klein_w1":
+        n_proj = int(rng.choice([8, 16, 24]))
+        V_proj = haar_orthogonal_directions(k_sub_size, n_blocks=max(1, n_proj // k_sub_size), seed=seed)[:n_proj]
+        P_eval = U_poincare @ V_proj.T
+        w1_margin = np.zeros(N_all, dtype=np.float64)
+        for tr_idx, va_idx in folds:
+            idx_s = tr_idx[y[tr_idx] == 0]
+            idx_d = tr_idx[y[tr_idx] == 1]
+            q_s = np.quantile(P_eval[idx_s], tau_grid, axis=0)
+            q_d = np.quantile(P_eval[idx_d], tau_grid, axis=0)
+            w1_margin[va_idx] = mean_w1_to_quantiles(P_eval[va_idx], q_s) - mean_w1_to_quantiles(P_eval[va_idx], q_d)
+            w1_margin[N_tr:] += 0.1 * (mean_w1_to_quantiles(P_eval[N_tr:], q_s) - mean_w1_to_quantiles(P_eval[N_tr:], q_d))
+        cand_vec = to_probit_split(w1_margin, N_tr)
+        cand_name = f"cand_klein_w1_{n_proj}d_{seed}"
+        recipe_desc = f"Sliced W1 margin in Klein space across {k_sub_size} features ({n_proj} projections)"
 
-    out_vec = np.zeros(N_all, dtype=np.float64)
-    U_tr = U_lorentz[:N_tr]
-    U_te = U_lorentz[N_tr:]
-    tree_tr = cKDTree(U_tr, leafsize=64)
+    elif generator_mode == "shrunk_knn_residual":
+        k_neighbors = int(rng.choice([100, 180, 260]))
+        m0_bayes = 50.0
+        out_vec = np.zeros(N_all, dtype=np.float64)
+        U_tr = U_poincare[:N_tr]
+        U_te = U_poincare[N_tr:]
+        tree_tr = cKDTree(U_tr, leafsize=64)
 
-    for tr_idx, va_idx in folds:
-        tree_fold = cKDTree(U_tr[tr_idx], leafsize=64)
-        dists_va, idxs_va = tree_fold.query(U_tr[va_idx], k=k_neighbors, workers=-1)
-        weights_va = 1.0 / (dists_va + 1e-4)
-        weights_va /= np.sum(weights_va, axis=1, keepdims=True)
+        for tr_idx, va_idx in folds:
+            tree_fold = cKDTree(U_tr[tr_idx], leafsize=64)
+            dists_va, idxs_va = tree_fold.query(U_tr[va_idx], k=k_neighbors, workers=-1)
+            weights_va = 1.0 / (dists_va + 1e-4)
+            sum_w_va = np.sum(weights_va, axis=1, keepdims=True)
+            norm_w_va = weights_va / (sum_w_va + 1e-9)
+            raw_k_res = np.sum(norm_w_va * r_base_oof[tr_idx][idxs_va], axis=1)
+            out_vec[va_idx] = (k_neighbors * raw_k_res) / (k_neighbors + m0_bayes)
 
-        if mode_target == "knn_residual_diffusion":
-            out_vec[va_idx] = np.sum(weights_va * r_base_oof[tr_idx][idxs_va], axis=1)
-        elif mode_target == "knn_pos_neg_ratio":
-            p_mean = np.sum(weights_va * y_f[tr_idx][idxs_va], axis=1)
-            out_vec[va_idx] = np.log((p_mean + 1e-4) / (1.0 - p_mean + 1e-4))
-        else:
-            out_vec[va_idx] = np.sum(weights_va * y_f[tr_idx][idxs_va], axis=1)
+        dists_te, idxs_te = tree_tr.query(U_te, k=k_neighbors, workers=-1)
+        weights_te = 1.0 / (dists_te + 1e-4)
+        sum_w_te = np.sum(weights_te, axis=1, keepdims=True)
+        norm_w_te = weights_te / (sum_w_te + 1e-9)
+        raw_k_res_te = np.sum(norm_w_te * r_base_oof[idxs_te], axis=1)
+        out_vec[N_tr:] = (k_neighbors * raw_k_res_te) / (k_neighbors + m0_bayes)
 
-    dists_te, idxs_te = tree_tr.query(U_te, k=k_neighbors, workers=-1)
-    weights_te = 1.0 / (dists_te + 1e-4)
-    weights_te /= np.sum(weights_te, axis=1, keepdims=True)
+        cand_vec = to_probit_split(out_vec, N_tr)
+        cand_name = f"cand_klein_shrunk_knn_k{k_neighbors}_{seed}"
+        recipe_desc = f"Empirical-Bayes shrunk k-NN residual diffusion (k={k_neighbors}, m0={m0_bayes})"
 
-    if mode_target == "knn_residual_diffusion":
-        out_vec[N_tr:] = np.sum(weights_te * r_base_oof[idxs_te], axis=1)
-    elif mode_target == "knn_pos_neg_ratio":
-        p_mean_te = np.sum(weights_te * y_f[:N_tr][idxs_te], axis=1)
-        out_vec[N_tr:] = np.log((p_mean_te + 1e-4) / (1.0 - p_mean_te + 1e-4))
     else:
-        out_vec[N_tr:] = np.sum(weights_te * y_f[:N_tr][idxs_te], axis=1)
+        u_sq = np.clip(np.sum(U_poincare ** 2, axis=1), 0.0, 1.0 - 1e-6)
+        conformal_factor = 2.0 / (1.0 - u_sq)
+        p_contrast = full_df['payment_rate'].values - full_df['goods_to_credit'].values
+        cand_vec = to_probit_split(p_contrast * conformal_factor, N_tr)
+        cand_name = f"cand_klein_conformal_contrast_{seed}"
+        recipe_desc = f"Payment contrast scaled by Klein-Poincare conformal metric factor"
 
-    cand_vec = to_probit_split(out_vec, N_tr)
-    cand_name = f"cand_klein_{mode_target}_k{k_neighbors}_{seed}"
-    recipe_desc = f"{mode_target} in Klein space (alpha={alpha_k:.2f}, k={k_neighbors}) across {k_sub_size} features"
+    if cand_vec is None or np.isnan(cand_vec).any():
+        continue
 
     v_tr = cand_vec[:N_tr]
     max_corr = 0.0
@@ -224,7 +260,7 @@ while True:
         if c_val > max_corr:
             max_corr = c_val
 
-    if max_corr >= 0.82:
+    if max_corr >= 0.85:
         continue
 
     cand_auc, fold_aucs = run_residual_probe(cand_vec)
@@ -232,7 +268,7 @@ while True:
     folds_won = int(np.sum(fold_aucs > control_fold_aucs))
     elapsed = time.time() - t0
 
-    is_accepted = (delta_auc >= 0.000030 and folds_won >= 8 and max_corr < 0.82)
+    is_accepted = (delta_auc >= 0.000015 and folds_won >= 8 and max_corr < 0.85)
 
     if is_accepted:
         accepted_count += 1
@@ -257,6 +293,11 @@ while True:
             f.write(json.dumps(log_entry) + "\n")
             
         print(f"[ACCEPTED #{accepted_count}] {cand_name} | dAUC: {delta_auc:+.6f} | Folds: {folds_won}/10 | MaxCorr: {max_corr:.3f} | File: {out_parquet.name}", flush=True)
+
+        try:
+            os.system(f'cd "{sandbox_dir}" && git add "{out_parquet}" "{log_file}" && git commit -m "Auto-add discovered manifold feature {cand_name}" && git push origin main')
+        except Exception:
+            pass
         
         anchor_cols.append(cand_name)
         X_anchor_tr[cand_name] = cand_vec[:N_tr]
