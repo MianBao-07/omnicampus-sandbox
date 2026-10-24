@@ -10,6 +10,7 @@ data/*.npz
 output/*.npz
 *.npz
 !data/.gitkeep
+!data/matrix_463_features_relational_tier4_part_*.bin
 !accepted_features/*.parquet
 !accepted_features/.gitkeep
 .vscode/

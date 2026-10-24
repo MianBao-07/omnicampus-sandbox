@@ -1,5 +1,6 @@
 import os
 import sys
+import glob
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
@@ -27,11 +28,35 @@ def to_strict_uniform_rank_f64(primary_arr: np.ndarray, tie_breaker_arr: np.ndar
     return ranks
 
 def load_data():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    candidate_chunk_dirs = [
+        "data",
+        ".",
+        "output",
+        "../output",
+        os.path.join(script_dir, "data"),
+        script_dir,
+        os.path.join(script_dir, "output")
+    ]
+    for d in candidate_chunk_dirs:
+        pattern = os.path.join(d, "matrix_463_features_relational_tier4_part_*.bin")
+        chunks = sorted(glob.glob(pattern))
+        target_npz = os.path.join(d, "matrix_463_features_relational_tier4.npz")
+        if chunks and not os.path.exists(target_npz):
+            print(f"Reassembling {len(chunks)} chunks into {target_npz}...", flush=True)
+            with open(target_npz, "wb") as f_out:
+                for chunk in chunks:
+                    with open(chunk, "rb") as f_in:
+                        f_out.write(f_in.read())
+            print(f"Reassembly complete: {target_npz} ({os.path.getsize(target_npz) / 1e6:.2f} MB)", flush=True)
     candidate_npz = [
         "data/matrix_463_features_relational_tier4.npz",
         "matrix_463_features_relational_tier4.npz",
         "output/matrix_463_features_relational_tier4.npz",
-        "../output/matrix_463_features_relational_tier4.npz"
+        "../output/matrix_463_features_relational_tier4.npz",
+        os.path.join(script_dir, "data", "matrix_463_features_relational_tier4.npz"),
+        os.path.join(script_dir, "matrix_463_features_relational_tier4.npz"),
+        os.path.join(script_dir, "output", "matrix_463_features_relational_tier4.npz")
     ]
     for p in candidate_npz:
         if os.path.exists(p):
