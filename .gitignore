@@ -6,10 +6,12 @@ __pycache__/
 data/*.pkl
 data/*.csv
 data/*.parquet
+data/*.npz
+output/*.npz
+*.npz
 !data/.gitkeep
 !accepted_features/*.parquet
 !accepted_features/.gitkeep
 .vscode/
 .idea/
 *.log
-
