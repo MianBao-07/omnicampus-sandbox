@@ -27,6 +27,7 @@ from train_cloud_dae_tabm463 import (
     TabMIndependentLoss,
     build_decoupled_optimizer,
     predict_tabm_463,
+    train_tabm_463_seed,
     to_average_uniform_rank_f64,
     to_strict_uniform_rank_f64
 )
