@@ -254,8 +254,8 @@ def train_transductive_swap_dae(
                 max_err = torch.max(torch.abs(diff), dim=1, keepdim=True)[0]
                 anom_prob = torch.sigmoid(c_logits).mean(axis=1, keepdim=True)
                 errs = torch.cat([torch.log1p(l2_err), torch.log1p(l1_err), torch.log1p(max_err), anom_prob], dim=1)
-            Z_list.append(z.cpu().numpy().astype(np.float32))
-            err_list.append(errs.cpu().numpy().astype(np.float32))
+            Z_list.append(z.float().cpu().numpy().astype(np.float32))
+            err_list.append(errs.float().cpu().numpy().astype(np.float32))
     Z_all = np.vstack(Z_list)
     E_all = np.vstack(err_list)
     DAE_all = np.hstack([Z_all, E_all]).astype(np.float32)
@@ -458,7 +458,7 @@ def predict_tabm_463(
         b_aux = t_aux[start:start + batch_size].to(device, non_blocking=True)
         with torch.amp.autocast(device_type=device.type, dtype=amp_dtype, enabled=(device.type == "cuda")):
             logits_k = model(b_qt, b_nan, b_aux, noise_std=0.0)
-            probs_k = torch.sigmoid(logits_k).mean(dim=1).detach().cpu().numpy().astype(np.float64)
+            probs_k = torch.sigmoid(logits_k).float().mean(dim=1).detach().cpu().numpy().astype(np.float64)
         preds.append(probs_k)
     return np.concatenate(preds, axis=0)
 

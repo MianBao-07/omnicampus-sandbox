@@ -478,7 +478,7 @@ def predict_resnet_plr(
         b_aux = t_aux[start:start + batch_size].to(device, non_blocking=True)
         with torch.amp.autocast(device_type=device.type, dtype=amp_dtype, enabled=(device.type == "cuda")):
             logits = model(b_qt, b_nan, b_aux, noise_std=0.0)
-            probs = torch.sigmoid(logits).detach().cpu().numpy().astype(np.float64)
+            probs = torch.sigmoid(logits).float().detach().cpu().numpy().astype(np.float64)
         preds.append(probs)
     return np.concatenate(preds, axis=0)
 
